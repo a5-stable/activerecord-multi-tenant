@@ -57,7 +57,9 @@ module MultiTenant
             super
             MultiTenant.register_multi_tenant_model(subclass)
             # Patch ActiveRecord::Relation with the extension module
-            "#{subclass}::ActiveRecord_Relation".constantize.prepend(Arel::ActiveRecordRelationExtension)
+            if subclass.is_a?(ActiveRecord::Base)
+              "#{subclass}::ActiveRecord_Relation".constantize.prepend(Arel::ActiveRecordRelationExtension)
+            end
           end
         end
 
