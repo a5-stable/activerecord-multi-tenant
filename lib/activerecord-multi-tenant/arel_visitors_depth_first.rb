@@ -14,6 +14,8 @@ module MultiTenant
       @block.call obj
     end
 
+    # rubocop:disable Naming/MethodName
+
     def unary(obj)
       visit obj.expr
     end
@@ -39,7 +41,7 @@ module MultiTenant
 
     def function(obj)
       visit obj.expressions
-      visit obj.alias
+      visit obj.alias if ActiveRecord.gem_version < Gem::Version.new('8.1')
       visit obj.distinct
     end
     alias visit_Arel_Nodes_Avg    function
@@ -48,18 +50,16 @@ module MultiTenant
     alias visit_Arel_Nodes_Min    function
     alias visit_Arel_Nodes_Sum    function
 
-    # rubocop:disable Naming/MethodName
-
     def visit_Arel_Nodes_NamedFunction(obj)
       visit obj.name
       visit obj.expressions
       visit obj.distinct
-      visit obj.alias
+      visit obj.alias if ActiveRecord.gem_version < Gem::Version.new('8.1')
     end
 
     def visit_Arel_Nodes_Count(obj)
       visit obj.expressions
-      visit obj.alias
+      visit obj.alias if ActiveRecord.gem_version < Gem::Version.new('8.1')
       visit obj.distinct
     end
 
@@ -197,7 +197,9 @@ module MultiTenant
       end
     end
 
+    # rubocop:disable Lint/UselessConstantScoping
     DISPATCH = dispatch_cache
+    # rubocop:enable Lint/UselessConstantScoping
 
     # rubocop:disable Naming/AccessorMethodName
     def get_dispatch_cache

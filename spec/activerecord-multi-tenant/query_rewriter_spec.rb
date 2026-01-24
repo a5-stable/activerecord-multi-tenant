@@ -10,6 +10,10 @@ describe 'Query Rewriter' do
     end
   end
 
+  after(:each) do
+    ActiveSupport::Notifications.unsubscribe('sql.active_record')
+  end
+
   context 'when bulk updating' do
     let!(:account) { Account.create!(name: 'Test Account') }
     let!(:project) { Project.create(name: 'Project 1', account: account) }
@@ -113,17 +117,6 @@ describe 'Query Rewriter' do
     let!(:manager1) { Manager.create(name: 'Manager 1', project: project1, account: account) }
     let!(:manager2) { Manager.create(name: 'Manager 2', project: project2, account: account) }
 
-    before(:each) do
-      @queries = []
-      ActiveSupport::Notifications.subscribe('sql.active_record') do |_name, _started, _finished, _unique_id, payload|
-        @queries << payload[:sql]
-      end
-    end
-
-    after(:each) do
-      ActiveSupport::Notifications.unsubscribe('sql.active_record')
-    end
-
     it 'delete_all the records' do
       expected_query = <<-SQL.strip
           DELETE FROM "projects" WHERE "projects"."id" IN
@@ -221,6 +214,38 @@ describe 'Query Rewriter' do
     end
   end
 
+  context 'when using non-multi-tenant model' do
+    let!(:account1) { Account.create!(name: 'Test Account') }
+    let!(:account2) { Account.create!(name: 'Test Account2') }
+    let!(:unscoped1) { UnscopedModelWithAccount.create!(name: 'Model 1', account: account1) }
+    let!(:unscoped2) { UnscopedModelWithAccount.create!(name: 'Model 2', account: account2) }
+
+    it 'updates records without tenant condition' do
+      expect do
+        MultiTenant.with(account1) do
+          UnscopedModelWithAccount.update_all(name: 'Updated Name')
+        end
+      end.to change { unscoped1.reload.name }.from('Model 1').to('Updated Name')
+                                             .and change { unscoped2.reload.name }.from('Model 2').to('Updated Name')
+
+      update_query = @queries.find { |q| q.include?('UPDATE "unscoped_model_with_accounts"') }
+      expect(update_query).to be_present
+      expect(update_query).not_to include('account_id')
+    end
+
+    it 'deletes records without tenant condition' do
+      expect do
+        MultiTenant.with(account1) do
+          UnscopedModelWithAccount.delete_all
+        end
+      end.to change { UnscopedModelWithAccount.count }.from(2).to(0)
+
+      delete_query = @queries.find { |q| q.include?('DELETE FROM "unscoped_model_with_accounts"') }
+      expect(delete_query).to be_present
+      expect(delete_query).not_to include('account_id')
+    end
+  end
+
   context 'when update without arel' do
     it 'can call method' do
       expect do
@@ -243,6 +268,104 @@ describe 'Query Rewriter' do
           Page.joins(:domain).pluck(:id)
         end
       ).to eq([page_in_alive_domain.id])
+    end
+  end
+
+  context 'when using composite primary keys' do
+    let!(:account) { Account.create!(name: 'Test Account') }
+    let!(:composite1) { CompositeKeyModel.create!(account: account, entity_id: 1, version: 1, name: 'Record 1') }
+    let!(:composite2) { CompositeKeyModel.create!(account: account, entity_id: 2, version: 1, name: 'Record 2') }
+
+    it 'delete_all works with composite primary keys' do
+      expect do
+        MultiTenant.with(account) do
+          CompositeKeyModel.delete_all
+        end
+      end.to change { CompositeKeyModel.count }.from(2).to(0)
+
+      # Verify the generated SQL is correct for composite primary keys
+      delete_query = @queries.find { |q| q.include?('DELETE FROM "composite_key_models"') }
+      expect(delete_query).to be_present
+
+      expected_query = <<~SQL.strip
+        DELETE FROM "composite_key_models"
+        WHERE ("composite_key_models"."entity_id", "composite_key_models"."version") IN (
+          SELECT "composite_key_models"."entity_id", "composite_key_models"."version"
+          FROM "composite_key_models"
+          WHERE "composite_key_models"."account_id" = #{account.id}
+        ) AND "composite_key_models"."account_id" = #{account.id}
+      SQL
+
+      expect(format_sql(delete_query)).to eq(format_sql(expected_query))
+    end
+
+    it 'update_all works with composite primary keys' do
+      MultiTenant.with(account) do
+        CompositeKeyModel.update_all(name: 'Updated Name')
+      end
+
+      expect(composite1.reload.name).to eq('Updated Name')
+      expect(composite2.reload.name).to eq('Updated Name')
+
+      # Verify the generated SQL is correct for composite primary keys
+      update_query = @queries.find { |q| q.include?('UPDATE "composite_key_models"') }
+      expect(update_query).to be_present
+
+      expected_query = <<~SQL.strip
+        UPDATE "composite_key_models"
+        SET "name" = 'Updated Name'
+        WHERE ("composite_key_models"."entity_id", "composite_key_models"."version") IN (
+          SELECT "composite_key_models"."entity_id", "composite_key_models"."version"
+          FROM "composite_key_models"
+          WHERE "composite_key_models"."account_id" = #{account.id}
+        ) AND "composite_key_models"."account_id" = #{account.id}
+      SQL
+
+      expect(format_sql(update_query)).to eq(format_sql(expected_query))
+    end
+  end
+
+  context 'when using aggregate functions and named functions with Arel' do
+    let!(:account) { Account.create!(name: 'Test Account') }
+    let!(:projects) { 3.times { |i| Project.create!(name: "Project #{i + 1}", account: account) } }
+
+    it 'handles COUNT in HAVING clause with tenant enforcement' do
+      table = Project.arel_table
+
+      result = MultiTenant.with(account) do
+        Project.select(table[:account_id])
+               .group(table[:account_id])
+               .having(table[:id].count.gt(2))
+               .to_a
+      end
+
+      expect(result.length).to eq(1)
+      expect(result.first.account_id).to eq(account.id)
+    end
+
+    it 'handles SUM in HAVING clause with tenant enforcement' do
+      table = Project.arel_table
+
+      result = MultiTenant.with(account) do
+        Project.select(table[:account_id])
+               .group(table[:account_id])
+               .having(table[:id].sum.gt(0))
+               .to_a
+      end
+
+      expect(result.length).to eq(1)
+    end
+
+    it 'handles NamedFunction in WHERE clause with tenant enforcement' do
+      table = Project.arel_table
+      lower_func = Arel::Nodes::NamedFunction.new('LOWER', [table[:name]])
+
+      result = MultiTenant.with(account) do
+        Project.where(lower_func.eq('project 1')).to_a
+      end
+
+      expect(result.length).to eq(1)
+      expect(result.first.name).to eq('Project 1')
     end
   end
 end

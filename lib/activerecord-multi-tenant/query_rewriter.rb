@@ -60,11 +60,7 @@ module MultiTenant
     end
   end
 
-  class ArelTenantVisitor < if Arel::Visitors.const_defined?(:DepthFirst)
-                              Arel::Visitors::DepthFirst
-                            else
-                              ::MultiTenant::ArelVisitorsDepthFirst
-                            end
+  class ArelTenantVisitor < ::MultiTenant::ArelVisitorsDepthFirst
     def initialize(arel)
       super(proc {})
       @statement_node_id = nil
@@ -136,12 +132,12 @@ module MultiTenant
       end
     end
 
-    # rubocop:enable Naming/MethodName
-
     alias visit_Arel_Nodes_FullOuterJoin visit_Arel_Nodes_OuterJoin
     alias visit_Arel_Nodes_RightOuterJoin visit_Arel_Nodes_OuterJoin
 
     alias visit_ActiveModel_Attribute terminal
+
+    # rubocop:enable Naming/MethodName
 
     private
 
@@ -149,9 +145,11 @@ module MultiTenant
       MultiTenant.multi_tenant_model_for_table(table_name).present?
     end
 
+    # rubocop:disable Lint/UselessConstantScoping
     DISPATCH = Hash.new do |hash, klass|
       hash[klass] = "visit_#{(klass.name || '').gsub('::', '_')}"
     end
+    # rubocop:enable Lint/UselessConstantScoping
 
     def dispatch
       DISPATCH
@@ -243,24 +241,6 @@ module MultiTenant
   end
 
   module DatabaseStatements
-    def join_to_update(update, *args)
-      update = super
-      model = MultiTenant.multi_tenant_model_for_table(MultiTenant::TableNode.table_name(update.ast.relation))
-      if model.present? && !MultiTenant.with_write_only_mode_enabled? && MultiTenant.current_tenant_id.present?
-        update.where(MultiTenant::TenantEnforcementClause.new(model.arel_table[model.partition_key]))
-      end
-      update
-    end
-
-    def join_to_delete(delete, *args)
-      delete = super
-      model = MultiTenant.multi_tenant_model_for_table(MultiTenant::TableNode.table_name(delete.ast.left))
-      if model.present? && !MultiTenant.with_write_only_mode_enabled? && MultiTenant.current_tenant_id.present?
-        delete.where(MultiTenant::TenantEnforcementClause.new(model.arel_table[model.partition_key]))
-      end
-      delete
-    end
-
     def update(arel, name = nil, binds = [])
       model = MultiTenant.multi_tenant_model_for_arel(arel)
       if model.present? && !MultiTenant.with_write_only_mode_enabled? && MultiTenant.current_tenant_id.present?
